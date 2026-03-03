@@ -70,7 +70,13 @@ app.post('/api/ai/chat', async (req, res) => {
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ contents }),
+        body: JSON.stringify({
+          contents,
+          generationConfig: {
+            maxOutputTokens: Math.min(req.body.maxTokens || 2048, 4096),
+            temperature: 0.7
+          }
+        }),
       }
     );
 
