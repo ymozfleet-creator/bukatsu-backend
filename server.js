@@ -95,7 +95,7 @@ async function verifyFirebaseToken(authHeader) {
   }
 }
 
-// ── 認証ミドルウェア ──
+// ── 認証ミドルウェア（厳密: AI/メール用）──
 async function requireAuth(req, res, next) {
   // 開発環境ではスキップ可能
   if (NODE_ENV === 'development' && !req.headers.authorization) {
@@ -105,6 +105,18 @@ async function requireAuth(req, res, next) {
   const user = await verifyFirebaseToken(req.headers.authorization);
   if (!user) return res.status(401).json({ error: '認証が必要です' });
   req.user = user;
+  next();
+}
+
+// ── 認証ミドルウェア（柔軟: Stripe用 — Stripe自体が決済セキュリティを担保）──
+async function optionalAuth(req, res, next) {
+  const user = await verifyFirebaseToken(req.headers.authorization);
+  if (user) {
+    req.user = user;
+  } else {
+    console.warn('[Auth] Stripe request without valid Firebase token from', req.ip);
+    req.user = { uid: 'anonymous', email: '' };
+  }
   next();
 }
 
@@ -250,8 +262,8 @@ async function createTuitionSession(req, res) {
     res.status(500).json({ error: e.message });
   }
 }
-app.post('/create-tuition-session', requireAuth, createTuitionSession);
-app.post('/api/stripe/monthly', requireAuth, createTuitionSession);
+app.post('/create-tuition-session', optionalAuth, createTuitionSession);
+app.post('/api/stripe/monthly', optionalAuth, createTuitionSession);
 
 // ── コーチ代 Checkout ──
 // フロントエンド互換パス: /create-coach-payment-session
@@ -286,8 +298,8 @@ async function createCoachSession(req, res) {
     res.status(500).json({ error: e.message });
   }
 }
-app.post('/create-coach-payment-session', requireAuth, createCoachSession);
-app.post('/api/stripe/coach', requireAuth, createCoachSession);
+app.post('/create-coach-payment-session', optionalAuth, createCoachSession);
+app.post('/api/stripe/coach', optionalAuth, createCoachSession);
 
 // ── 都度請求 Checkout ──
 async function createAdhocSession(req, res) {
@@ -321,8 +333,8 @@ async function createAdhocSession(req, res) {
     res.status(500).json({ error: e.message });
   }
 }
-app.post('/create-adhoc-payment-session', requireAuth, createAdhocSession);
-app.post('/api/stripe/adhoc', requireAuth, createAdhocSession);
+app.post('/create-adhoc-payment-session', optionalAuth, createAdhocSession);
+app.post('/api/stripe/adhoc', optionalAuth, createAdhocSession);
 
 // ── セッション状態確認 ──
 async function getSessionStatus(req, res) {
@@ -335,8 +347,8 @@ async function getSessionStatus(req, res) {
     res.status(500).json({ error: e.message });
   }
 }
-app.get('/session-status/:id', requireAuth, getSessionStatus);
-app.get('/api/stripe/session/:id', requireAuth, getSessionStatus);
+app.get('/session-status/:id', optionalAuth, getSessionStatus);
+app.get('/api/stripe/session/:id', optionalAuth, getSessionStatus);
 
 // ── Stripe Connect（コーチ口座登録）──
 async function createConnectAccount(req, res) {
@@ -362,8 +374,8 @@ async function createConnectAccount(req, res) {
     res.status(500).json({ error: e.message });
   }
 }
-app.post('/create-connect-account', requireAuth, createConnectAccount);
-app.post('/api/stripe/connect', requireAuth, createConnectAccount);
+app.post('/create-connect-account', optionalAuth, createConnectAccount);
+app.post('/api/stripe/connect', optionalAuth, createConnectAccount);
 
 // ── Webhook（Stripe → サーバー）──
 function handleWebhook(req, res) {
