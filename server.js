@@ -1,13 +1,16 @@
 // ============================================================
-// 部勝（ブカツ）Backend Server v30 - セキュリティ強化版
+// 部勝（ブカツ）Backend Server v32 - Production Ready
 // ============================================================
 // デプロイ先: Render (https://bukatsu-backend.onrender.com)
-// 環境変数:
-//   GEMINI_API_KEY    - Google Gemini API キー（必須）
-//   STRIPE_SECRET_KEY - Stripe シークレットキー（必須）
-//   SENDGRID_API_KEY  - SendGrid API キー（任意）
-//   FIREBASE_PROJECT_ID - Firebase プロジェクトID（認証用）
-//   ALLOWED_ORIGINS   - CORS許可オリジン（カンマ区切り）
+//
+// 環境変数（Render Dashboard → Environment で設定）:
+//   GEMINI_API_KEY       - Google Gemini API キー（必須: AI機能）
+//   STRIPE_SECRET_KEY    - Stripe シークレットキー（必須: 決済）
+//   STRIPE_WEBHOOK_SECRET - Stripe Webhook署名シークレット（推奨）
+//   SENDGRID_API_KEY     - SendGrid API キー（任意: メール通知）
+//   FIREBASE_PROJECT_ID  - Firebase プロジェクトID（デフォルト: myteam-mycoach）
+//   ALLOWED_ORIGINS      - CORS許可オリジン（カンマ区切り）
+//   NODE_ENV             - production / development
 // ============================================================
 
 const express = require('express');
@@ -17,99 +20,135 @@ const app = express();
 // ── 環境変数 ──
 const GEMINI_KEY = process.env.GEMINI_API_KEY || '';
 const STRIPE_KEY = process.env.STRIPE_SECRET_KEY || '';
+const STRIPE_WH_SECRET = process.env.STRIPE_WEBHOOK_SECRET || '';
 const SENDGRID_KEY = process.env.SENDGRID_API_KEY || '';
 const FB_PROJECT = process.env.FIREBASE_PROJECT_ID || 'myteam-mycoach';
+const NODE_ENV = process.env.NODE_ENV || 'development';
 const PORT = process.env.PORT || 3000;
 
-// セキュリティチェック: 起動時にキーの有無を確認
-if (!GEMINI_KEY) console.warn('⚠️  GEMINI_API_KEY が未設定です。AI機能は動作しません。');
-if (!STRIPE_KEY) console.warn('⚠️  STRIPE_SECRET_KEY が未設定です。決済機能は動作しません。');
+// 起動時チェック
+console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+console.log('🏟️  部勝 Backend v32');
+console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+if (!GEMINI_KEY) console.warn('⚠️  GEMINI_API_KEY 未設定 → AI機能停止');
+if (!STRIPE_KEY) console.warn('⚠️  STRIPE_SECRET_KEY 未設定 → 決済停止');
+if (!STRIPE_WH_SECRET) console.warn('⚠️  STRIPE_WEBHOOK_SECRET 未設定 → Webhook署名検証なし');
+if (!SENDGRID_KEY) console.warn('⚠️  SENDGRID_API_KEY 未設定 → メール停止');
 
 // ── CORS ──
-const allowedOrigins = (process.env.ALLOWED_ORIGINS || 'https://myteam-mycoach.web.app,https://myteam-mycoach.firebaseapp.com,http://localhost:5000').split(',');
+const allowedOrigins = (process.env.ALLOWED_ORIGINS ||
+  'https://myteam-mycoach.web.app,https://myteam-mycoach.firebaseapp.com,http://localhost:5000,http://localhost:3000'
+).split(',').map(s => s.trim());
+
 app.use(cors({
   origin: function(origin, cb) {
     if (!origin || allowedOrigins.includes(origin)) cb(null, true);
-    else cb(new Error('CORS blocked: ' + origin));
+    else { console.warn('[CORS] Blocked:', origin); cb(new Error('CORS blocked')); }
   },
-  methods: ['GET','POST','OPTIONS'],
-  allowedHeaders: ['Content-Type','Authorization']
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
 }));
 
+// Webhook用: raw bodyが必要（他のルートより先に定義）
+app.post('/api/webhook', express.raw({ type: 'application/json' }), handleWebhook);
+
+// 通常のルート用
 app.use(express.json({ limit: '10mb' }));
 
-// ── レート制限（簡易） ──
-const rateLimits = {};
-function rateLimit(ip, limit = 30, windowMs = 60000) {
+// ── レート制限 ──
+const _rl = {};
+function rateLimit(key, limit = 30, windowMs = 60000) {
   const now = Date.now();
-  if (!rateLimits[ip]) rateLimits[ip] = [];
-  rateLimits[ip] = rateLimits[ip].filter(t => t > now - windowMs);
-  if (rateLimits[ip].length >= limit) return false;
-  rateLimits[ip].push(now);
+  if (!_rl[key]) _rl[key] = [];
+  _rl[key] = _rl[key].filter(t => t > now - windowMs);
+  if (_rl[key].length >= limit) return false;
+  _rl[key].push(now);
   return true;
 }
+// 古いエントリを定期クリーンアップ
+setInterval(() => {
+  const cutoff = Date.now() - 300000;
+  Object.keys(_rl).forEach(k => {
+    _rl[k] = _rl[k].filter(t => t > cutoff);
+    if (!_rl[k].length) delete _rl[k];
+  });
+}, 300000);
 
 // ── Firebase IDトークン検証 ──
-// Google公開鍵で検証（軽量版: JWTデコード + 発行者チェック）
 async function verifyFirebaseToken(authHeader) {
   if (!authHeader || !authHeader.startsWith('Bearer ')) return null;
   const token = authHeader.split(' ')[1];
   if (!token || token.length < 100) return null;
-
   try {
-    // JWTのペイロード部分をデコード
     const parts = token.split('.');
     if (parts.length !== 3) return null;
     const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString());
-
-    // 基本検証
     const now = Math.floor(Date.now() / 1000);
-    if (payload.exp && payload.exp < now) return null;                          // 有効期限切れ
-    if (payload.iss !== 'https://securetoken.google.com/' + FB_PROJECT) return null; // 発行者不正
-    if (payload.aud !== FB_PROJECT) return null;                                // 対象不正
-    if (!payload.user_id && !payload.sub) return null;                          // ユーザーID不在
-
+    if (payload.exp && payload.exp < now) return null;
+    if (payload.iss !== `https://securetoken.google.com/${FB_PROJECT}`) return null;
+    if (payload.aud !== FB_PROJECT) return null;
+    if (!payload.user_id && !payload.sub) return null;
     return { uid: payload.user_id || payload.sub, email: payload.email || '' };
   } catch (e) {
-    console.warn('[Auth] Token decode error:', e.message);
+    console.warn('[Auth] Token error:', e.message);
     return null;
   }
 }
 
 // ── 認証ミドルウェア ──
 async function requireAuth(req, res, next) {
-  const user = await verifyFirebaseToken(req.headers.authorization);
-  if (!user) {
-    return res.status(401).json({ error: '認証が必要です。ログインしてください。' });
+  // 開発環境ではスキップ可能
+  if (NODE_ENV === 'development' && !req.headers.authorization) {
+    req.user = { uid: 'dev-user', email: 'dev@localhost' };
+    return next();
   }
+  const user = await verifyFirebaseToken(req.headers.authorization);
+  if (!user) return res.status(401).json({ error: '認証が必要です' });
   req.user = user;
   next();
 }
 
-// ── ヘルスチェック ──
+// ── リクエストログ ──
+app.use((req, res, next) => {
+  if (req.path !== '/health') {
+    console.log(`[${new Date().toISOString().slice(11, 19)}] ${req.method} ${req.path}`);
+  }
+  next();
+});
+
+// ================================================================
+// ヘルスチェック
+// ================================================================
 app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
-    version: 'v30-secure',
-    gemini: !!GEMINI_KEY,
-    stripe: !!STRIPE_KEY,
-    sendgrid: !!SENDGRID_KEY,
-    firebase: FB_PROJECT,
+    version: 'v32',
+    env: NODE_ENV,
+    services: {
+      gemini: !!GEMINI_KEY,
+      stripe: !!STRIPE_KEY,
+      sendgrid: !!SENDGRID_KEY,
+      webhook: !!STRIPE_WH_SECRET,
+    },
+    uptime: Math.round(process.uptime()),
     timestamp: new Date().toISOString()
   });
 });
 
-// ============================================================
-// AI チャット（Gemini プロキシ）- 認証必須
-// ============================================================
-app.post('/api/ai/chat', requireAuth, async (req, res) => {
-  const ip = req.ip || req.connection.remoteAddress;
-  if (!rateLimit(ip, 20, 60000)) {
-    return res.status(429).json({ error: 'リクエストが多すぎます。1分後に再試行してください。' });
-  }
+app.get('/', (req, res) => {
+  res.json({ name: '部勝 Backend API', version: 'v32', docs: '/health' });
+});
 
+// ================================================================
+// AI チャット（Gemini プロキシ）
+// ================================================================
+app.post('/api/ai/chat', requireAuth, async (req, res) => {
+  const ip = req.ip;
+  if (!rateLimit(ip + '_ai', 20, 60000)) {
+    return res.status(429).json({ error: 'リクエスト制限に達しました。1分後に再試行してください。' });
+  }
   if (!GEMINI_KEY) {
-    return res.status(503).json({ error: 'AI機能は現在利用できません。管理者にお問い合わせください。' });
+    return res.status(503).json({ error: 'AI機能は現在利用できません。' });
   }
 
   try {
@@ -118,7 +157,6 @@ app.post('/api/ai/chat', requireAuth, async (req, res) => {
       return res.status(400).json({ error: 'messages is required' });
     }
 
-    // Gemini API形式に変換
     const geminiMessages = [];
     if (system) {
       geminiMessages.push({ role: 'user', parts: [{ text: system }] });
@@ -148,7 +186,7 @@ app.post('/api/ai/chat', requireAuth, async (req, res) => {
 
     const data = await geminiRes.json();
     if (data.error) {
-      console.error('[Gemini] API error:', data.error.message);
+      console.error('[Gemini] Error:', data.error.message);
       return res.status(500).json({ error: data.error.message });
     }
 
@@ -157,112 +195,242 @@ app.post('/api/ai/chat', requireAuth, async (req, res) => {
 
   } catch (e) {
     console.error('[AI] Error:', e.message);
-    res.status(500).json({ error: 'AI処理中にエラーが発生しました。' });
+    res.status(500).json({ error: 'AI処理エラー' });
   }
 });
 
-// ============================================================
-// Stripe 決済エンドポイント - 認証必須
-// ============================================================
+// ================================================================
+// Stripe 決済
+// ================================================================
 let stripe;
 if (STRIPE_KEY) {
   stripe = require('stripe')(STRIPE_KEY);
 }
 
-// 月謝 Checkout
-app.post('/api/stripe/monthly', requireAuth, async (req, res) => {
-  if (!stripe) return res.status(503).json({ error: 'Stripe未設定' });
+function stripeUnavailable(res) {
+  return res.status(503).json({ error: 'Stripe決済は現在利用できません。管理者に連絡してください。' });
+}
+
+function getOrigin(req) {
+  return req.headers.origin || allowedOrigins[0];
+}
+
+// ── 月謝 Checkout ──
+// フロントエンド互換パス: /create-tuition-session
+// 正規パス: /api/stripe/monthly
+async function createTuitionSession(req, res) {
+  if (!stripe) return stripeUnavailable(res);
   try {
-    const { amount, teamId, playerId, guardianId, month, teamName } = req.body;
+    const { amount, teamId, playerId, guardianId, month, teamName, playerName } = req.body;
+    if (!amount || amount < 100) return res.status(400).json({ error: '金額が不正です' });
+
     const platformFee = Math.round(amount * 0.05);
     const session = await stripe.checkout.sessions.create({
       mode: 'payment',
-      line_items: [{ price_data: { currency: 'jpy', unit_amount: amount + platformFee, product_data: { name: `${teamName || 'チーム'} 月謝 ${month || ''}` } }, quantity: 1 }],
-      success_url: `${req.headers.origin || allowedOrigins[0]}?payment=success&session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${req.headers.origin || allowedOrigins[0]}?payment=cancel`,
-      metadata: { type: 'monthly_fee', teamId, payerId: playerId, guardianId, month, originalAmount: String(amount), platformFee: String(platformFee) }
+      line_items: [{
+        price_data: {
+          currency: 'jpy',
+          unit_amount: amount + platformFee,
+          product_data: { name: `${teamName || 'チーム'} 月謝 ${month || ''}` }
+        },
+        quantity: 1
+      }],
+      success_url: `${getOrigin(req)}?payment=success&session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${getOrigin(req)}?payment=cancel`,
+      metadata: {
+        type: 'monthly_fee', teamId: teamId || '', playerId: playerId || '',
+        guardianId: guardianId || '', month: month || '',
+        originalAmount: String(amount), platformFee: String(platformFee)
+      }
     });
-    res.json({ url: session.url, sessionId: session.id });
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
+    // フロント互換: sessionUrl と url の両方を返す
+    res.json({ sessionUrl: session.url, url: session.url, sessionId: session.id });
+  } catch (e) {
+    console.error('[Stripe/Monthly]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+}
+app.post('/create-tuition-session', requireAuth, createTuitionSession);
+app.post('/api/stripe/monthly', requireAuth, createTuitionSession);
 
-// コーチ代 Checkout
-app.post('/api/stripe/coach', requireAuth, async (req, res) => {
-  if (!stripe) return res.status(503).json({ error: 'Stripe未設定' });
+// ── コーチ代 Checkout ──
+// フロントエンド互換パス: /create-coach-payment-session
+async function createCoachSession(req, res) {
+  if (!stripe) return stripeUnavailable(res);
   try {
-    const { amount, threadId, month, coachName } = req.body;
+    const { amount, threadId, month, coachName, coachId, teamId, teamName } = req.body;
+    if (!amount || amount < 100) return res.status(400).json({ error: '金額が不正です' });
+
     const platformFee = Math.round(amount * 0.1);
     const session = await stripe.checkout.sessions.create({
       mode: 'payment',
-      line_items: [{ price_data: { currency: 'jpy', unit_amount: amount + platformFee, product_data: { name: `${coachName || 'コーチ'} 指導料 ${month || ''}` } }, quantity: 1 }],
-      success_url: `${req.headers.origin || allowedOrigins[0]}?payment=success&session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${req.headers.origin || allowedOrigins[0]}?payment=cancel`,
-      metadata: { type: 'coach_fee', threadId, month, originalAmount: String(amount), platformFee: String(platformFee) }
+      line_items: [{
+        price_data: {
+          currency: 'jpy',
+          unit_amount: amount + platformFee,
+          product_data: { name: `${coachName || 'コーチ'} 指導料 ${month || ''}` }
+        },
+        quantity: 1
+      }],
+      success_url: `${getOrigin(req)}?payment=success&session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${getOrigin(req)}?payment=cancel`,
+      metadata: {
+        type: 'coach_fee', threadId: threadId || '', coachId: coachId || '',
+        teamId: teamId || '', month: month || '',
+        originalAmount: String(amount), platformFee: String(platformFee)
+      }
     });
-    res.json({ url: session.url, sessionId: session.id });
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
+    res.json({ sessionUrl: session.url, url: session.url, sessionId: session.id });
+  } catch (e) {
+    console.error('[Stripe/Coach]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+}
+app.post('/create-coach-payment-session', requireAuth, createCoachSession);
+app.post('/api/stripe/coach', requireAuth, createCoachSession);
 
-// 都度請求 Checkout
-app.post('/api/stripe/adhoc', requireAuth, async (req, res) => {
-  if (!stripe) return res.status(503).json({ error: 'Stripe未設定' });
+// ── 都度請求 Checkout ──
+async function createAdhocSession(req, res) {
+  if (!stripe) return stripeUnavailable(res);
   try {
     const { amount, invoiceId, title, teamId, playerId } = req.body;
+    if (!amount || amount < 100) return res.status(400).json({ error: '金額が不正です' });
+
     const platformFee = Math.round(amount * 0.05);
     const session = await stripe.checkout.sessions.create({
       mode: 'payment',
-      line_items: [{ price_data: { currency: 'jpy', unit_amount: amount + platformFee, product_data: { name: title || '都度請求' } }, quantity: 1 }],
-      success_url: `${req.headers.origin || allowedOrigins[0]}?payment=success&session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${req.headers.origin || allowedOrigins[0]}?payment=cancel`,
-      metadata: { type: 'adhoc', invoiceId, teamId, playerId, originalAmount: String(amount), platformFee: String(platformFee) }
+      line_items: [{
+        price_data: {
+          currency: 'jpy',
+          unit_amount: amount + platformFee,
+          product_data: { name: title || '都度請求' }
+        },
+        quantity: 1
+      }],
+      success_url: `${getOrigin(req)}?payment=success&session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${getOrigin(req)}?payment=cancel`,
+      metadata: {
+        type: 'adhoc', invoiceId: invoiceId || '', teamId: teamId || '',
+        playerId: playerId || '',
+        originalAmount: String(amount), platformFee: String(platformFee)
+      }
     });
-    res.json({ url: session.url, sessionId: session.id });
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
+    res.json({ sessionUrl: session.url, url: session.url, sessionId: session.id });
+  } catch (e) {
+    console.error('[Stripe/Adhoc]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+}
+app.post('/create-adhoc-payment-session', requireAuth, createAdhocSession);
+app.post('/api/stripe/adhoc', requireAuth, createAdhocSession);
 
-// セッション状態確認
-app.get('/api/stripe/session/:id', requireAuth, async (req, res) => {
-  if (!stripe) return res.status(503).json({ error: 'Stripe未設定' });
+// ── セッション状態確認 ──
+async function getSessionStatus(req, res) {
+  if (!stripe) return stripeUnavailable(res);
   try {
     const session = await stripe.checkout.sessions.retrieve(req.params.id);
     res.json({ status: session.payment_status, metadata: session.metadata });
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
+  } catch (e) {
+    console.error('[Stripe/Session]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+}
+app.get('/session-status/:id', requireAuth, getSessionStatus);
+app.get('/api/stripe/session/:id', requireAuth, getSessionStatus);
 
-// Stripe Connect (コーチ口座登録)
-app.post('/api/stripe/connect', requireAuth, async (req, res) => {
-  if (!stripe) return res.status(503).json({ error: 'Stripe未設定' });
+// ── Stripe Connect（コーチ口座登録）──
+async function createConnectAccount(req, res) {
+  if (!stripe) return stripeUnavailable(res);
   try {
-    const account = await stripe.accounts.create({ type: 'express', country: 'JP', capabilities: { card_payments: { requested: true }, transfers: { requested: true } } });
-    const link = await stripe.accountLinks.create({ account: account.id, refresh_url: `${req.headers.origin || allowedOrigins[0]}?stripe_connect=refresh`, return_url: `${req.headers.origin || allowedOrigins[0]}?stripe_connect=success`, type: 'account_onboarding' });
+    const account = await stripe.accounts.create({
+      type: 'express',
+      country: 'JP',
+      capabilities: {
+        card_payments: { requested: true },
+        transfers: { requested: true }
+      }
+    });
+    const link = await stripe.accountLinks.create({
+      account: account.id,
+      refresh_url: `${getOrigin(req)}?stripe_connect=refresh`,
+      return_url: `${getOrigin(req)}?stripe_connect=success`,
+      type: 'account_onboarding'
+    });
     res.json({ url: link.url, accountId: account.id });
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
+  } catch (e) {
+    console.error('[Stripe/Connect]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+}
+app.post('/create-connect-account', requireAuth, createConnectAccount);
+app.post('/api/stripe/connect', requireAuth, createConnectAccount);
 
-// Webhook (認証不要 - Stripe側から直接呼ばれる)
-app.post('/api/webhook', express.raw({ type: 'application/json' }), (req, res) => {
-  // Stripe Webhook処理（実装時にWebhook Secretで署名検証を追加）
-  console.log('[Webhook] Received event');
+// ── Webhook（Stripe → サーバー）──
+function handleWebhook(req, res) {
+  let event;
+  try {
+    if (STRIPE_WH_SECRET && stripe) {
+      const sig = req.headers['stripe-signature'];
+      event = stripe.webhooks.constructEvent(req.body, sig, STRIPE_WH_SECRET);
+    } else {
+      event = JSON.parse(req.body.toString());
+    }
+  } catch (e) {
+    console.error('[Webhook] 署名検証失敗:', e.message);
+    return res.status(400).json({ error: 'Webhook signature verification failed' });
+  }
+
+  console.log(`[Webhook] ${event.type} (${event.id})`);
+
+  switch (event.type) {
+    case 'checkout.session.completed': {
+      const session = event.data.object;
+      console.log('[Webhook] 決済完了:', {
+        type: session.metadata?.type,
+        amount: session.amount_total,
+        status: session.payment_status
+      });
+      // TODO: Firestoreの支払いステータスを自動更新
+      break;
+    }
+    case 'payment_intent.payment_failed': {
+      const pi = event.data.object;
+      console.log('[Webhook] 決済失敗:', pi.id, pi.last_payment_error?.message);
+      break;
+    }
+    default:
+      console.log('[Webhook] Unhandled:', event.type);
+  }
+
   res.json({ received: true });
-});
+}
 
-// ============================================================
-// メール送信（SendGrid）- 認証必須
-// ============================================================
+// ================================================================
+// メール送信（SendGrid）
+// ================================================================
 app.post('/api/email/send', requireAuth, async (req, res) => {
   if (!SENDGRID_KEY) return res.status(503).json({ error: 'メール機能未設定' });
-  const ip = req.ip || req.connection.remoteAddress;
+
+  const ip = req.ip;
   if (!rateLimit(ip + '_email', 10, 60000)) {
-    return res.status(429).json({ error: 'メール送信の制限に達しました。' });
+    return res.status(429).json({ error: 'メール送信制限に達しました' });
   }
 
   try {
     const { to, toName, subject, body } = req.body;
-    if (!to || !subject) return res.status(400).json({ error: 'to and subject required' });
+    if (!to || !subject) return res.status(400).json({ error: 'to, subject は必須です' });
+
+    // メールアドレスの簡易バリデーション
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(to)) {
+      return res.status(400).json({ error: 'メールアドレスが不正です' });
+    }
 
     const sgRes = await fetch('https://api.sendgrid.com/v3/mail/send', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${SENDGRID_KEY}` },
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${SENDGRID_KEY}`
+      },
       body: JSON.stringify({
         personalizations: [{ to: [{ email: to, name: toName || '' }] }],
         from: { email: 'noreply@bukatsu.app', name: '部勝（ブカツ）' },
@@ -270,20 +438,29 @@ app.post('/api/email/send', requireAuth, async (req, res) => {
         content: [{ type: 'text/html', value: body }]
       })
     });
+
     if (sgRes.ok || sgRes.status === 202) {
       res.json({ ok: true });
     } else {
       const err = await sgRes.text();
       console.error('[SendGrid] Error:', err);
-      res.status(500).json({ error: 'メール送信に失敗しました' });
+      res.status(500).json({ error: 'メール送信失敗' });
     }
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) {
+    console.error('[Email] Error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── エラーハンドラー ──
+app.use((err, req, res, next) => {
+  console.error('[Error]', err.message);
+  res.status(500).json({ error: 'サーバーエラー' });
 });
 
 // ── 起動 ──
 app.listen(PORT, () => {
-  console.log(`🚀 部勝 Backend v30-secure running on port ${PORT}`);
-  console.log(`   Gemini: ${GEMINI_KEY ? '✅' : '❌'}  Stripe: ${STRIPE_KEY ? '✅' : '❌'}  SendGrid: ${SENDGRID_KEY ? '✅' : '❌'}`);
-  console.log(`   Firebase Project: ${FB_PROJECT}`);
-  console.log(`   Allowed Origins: ${allowedOrigins.join(', ')}`);
+  console.log(`🚀 起動完了 port:${PORT} env:${NODE_ENV}`);
+  console.log(`   Gemini:${GEMINI_KEY ? '✅' : '❌'} Stripe:${STRIPE_KEY ? '✅' : '❌'} SendGrid:${SENDGRID_KEY ? '✅' : '❌'} Webhook:${STRIPE_WH_SECRET ? '✅' : '❌'}`);
+  console.log(`   Origins: ${allowedOrigins.join(', ')}`);
 });

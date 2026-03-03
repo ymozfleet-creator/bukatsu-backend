@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: bukatsu-backend
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: node server.js
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: STRIPE_SECRET_KEY
+        sync: false
+      - key: STRIPE_WEBHOOK_SECRET
+        sync: false
+      - key: SENDGRID_API_KEY
+        sync: false
+      - key: FIREBASE_PROJECT_ID
+        value: myteam-mycoach
+      - key: ALLOWED_ORIGINS
+        value: https://myteam-mycoach.web.app,https://myteam-mycoach.firebaseapp.com
