@@ -4,14 +4,15 @@
 // デプロイ先: Render (https://bukatsu-backend.onrender.com)
 //
 // 環境変数（Render Dashboard → Environment で設定）:
-//   GEMINI_API_KEY       - Google Gemini API キー（必須: AI機能）
-//   STRIPE_SECRET_KEY    - Stripe シークレットキー（必須: 決済）
-//   STRIPE_WEBHOOK_SECRET - Stripe Webhook署名シークレット（推奨）
-//   SENDGRID_API_KEY     - SendGrid API キー（任意: メール通知）
-//   FIREBASE_PROJECT_ID  - Firebase プロジェクトID（デフォルト: myteam-mycoach）
-//   ALLOWED_ORIGINS      - CORS許可オリジン（カンマ区切り）
-//   ADMIN_EMAILS         - 管理者メール（カンマ区切り, 管理者API用）
-//   NODE_ENV             - production / development
+//   GEMINI_API_KEY         - Google Gemini API キー（必須: AI機能）
+//   STRIPE_SECRET_KEY      - Stripe シークレットキー（必須: 決済）
+//   STRIPE_WEBHOOK_SECRET  - Stripe Webhook署名シークレット（推奨）
+//   SENDGRID_API_KEY       - SendGrid API キー（任意: メール通知）
+//   FIREBASE_PROJECT_ID    - Firebase プロジェクトID（デフォルト: myteam-mycoach）
+//   FIREBASE_SERVICE_ACCOUNT - Firebase Admin SDK サービスアカウントJSON（必須: Webhook→DB）
+//   ALLOWED_ORIGINS        - CORS許可オリジン（カンマ区切り）
+//   ADMIN_EMAILS           - 管理者メール（カンマ区切り, 管理者API用）
+//   NODE_ENV               - production / development
 // ============================================================
 
 const express = require('express');
@@ -25,9 +26,29 @@ const STRIPE_KEY = process.env.STRIPE_SECRET_KEY || '';
 const STRIPE_WH_SECRET = process.env.STRIPE_WEBHOOK_SECRET || '';
 const SENDGRID_KEY = process.env.SENDGRID_API_KEY || '';
 const FB_PROJECT = process.env.FIREBASE_PROJECT_ID || 'myteam-mycoach';
+const FB_SERVICE_ACCOUNT = process.env.FIREBASE_SERVICE_ACCOUNT || '';
 const NODE_ENV = process.env.NODE_ENV || 'development';
 const PORT = process.env.PORT || 3000;
 const ADMIN_EMAILS = (process.env.ADMIN_EMAILS || '').split(',').map(s => s.trim()).filter(Boolean);
+
+// ── Firebase Admin SDK（Webhook→Firestore書込み用）──
+let firebaseAdmin, firestoreDb;
+try {
+  firebaseAdmin = require('firebase-admin');
+  if (FB_SERVICE_ACCOUNT) {
+    const serviceAccount = JSON.parse(FB_SERVICE_ACCOUNT);
+    firebaseAdmin.initializeApp({
+      credential: firebaseAdmin.credential.cert(serviceAccount),
+      projectId: FB_PROJECT
+    });
+    firestoreDb = firebaseAdmin.firestore();
+    console.log('✅ Firebase Admin SDK 初期化完了');
+  } else {
+    console.warn('⚠️  FIREBASE_SERVICE_ACCOUNT 未設定 → Webhook→DB書込み停止');
+  }
+} catch (e) {
+  console.warn('⚠️  Firebase Admin SDK 初期化失敗:', e.message);
+}
 
 // 起動時チェック
 console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
@@ -233,6 +254,7 @@ app.get('/health', (req, res) => {
       stripe: !!STRIPE_KEY,
       sendgrid: !!SENDGRID_KEY,
       webhook: !!STRIPE_WH_SECRET,
+      firestore: !!firestoreDb,
     },
     uptime,
     uptimeFormatted: `${Math.floor(uptime/3600)}h ${Math.floor((uptime%3600)/60)}m`,
@@ -405,16 +427,35 @@ function validateAmount(amount) {
   return n;
 }
 
+// ── 日本向け決済手段設定（クレカ・コンビニ・銀行振込） ──
+const JP_PAYMENT_CONFIG = {
+  payment_method_types: ['card', 'konbini', 'customer_balance'],
+  payment_method_options: {
+    konbini: {
+      expires_after_days: 3  // コンビニ払い期限: 3日
+    },
+    customer_balance: {
+      funding_type: 'bank_transfer',
+      bank_transfer: {
+        type: 'jp_bank_transfer'  // 日本の銀行振込
+      }
+    }
+  }
+};
+
 // ── 月謝 Checkout ──
 async function createTuitionSession(req, res) {
   if (!stripe) return stripeUnavailable(res);
   try {
     const amount = validateAmount(req.body.amount);
     if (!amount) return res.status(400).json({ error: '金額が不正です (100〜10,000,000円)' });
-    const { teamId, playerId, guardianId, month, teamName, playerName } = req.body;
+    const { teamId, playerId, guardianId, month, teamName, playerName, feeRate } = req.body;
 
-    const platformFee = Math.round(amount * 0.05);
+    // 手数料率: フロントから送信された値を使用（0〜50%の範囲でバリデーション、デフォルト10%）
+    const rate = (typeof feeRate === 'number' && feeRate >= 0 && feeRate <= 50) ? feeRate : 10;
+    const platformFee = Math.round(amount * rate / 100);
     const session = await stripe.checkout.sessions.create({
+      ...JP_PAYMENT_CONFIG,
       mode: 'payment',
       line_items: [{
         price_data: {
@@ -448,10 +489,12 @@ async function createCoachSession(req, res) {
   try {
     const amount = validateAmount(req.body.amount);
     if (!amount) return res.status(400).json({ error: '金額が不正です' });
-    const { threadId, month, coachName, coachId, teamId, teamName } = req.body;
+    const { threadId, month, coachName, coachId, teamId, teamName, feeRate } = req.body;
 
-    const platformFee = Math.round(amount * 0.1);
+    const rate = (typeof feeRate === 'number' && feeRate >= 0 && feeRate <= 50) ? feeRate : 10;
+    const platformFee = Math.round(amount * rate / 100);
     const session = await stripe.checkout.sessions.create({
+      ...JP_PAYMENT_CONFIG,
       mode: 'payment',
       line_items: [{
         price_data: {
@@ -485,10 +528,12 @@ async function createAdhocSession(req, res) {
   try {
     const amount = validateAmount(req.body.amount);
     if (!amount) return res.status(400).json({ error: '金額が不正です' });
-    const { invoiceId, title, teamId, playerId } = req.body;
+    const { invoiceId, title, teamId, playerId, feeRate } = req.body;
 
-    const platformFee = Math.round(amount * 0.05);
+    const rate = (typeof feeRate === 'number' && feeRate >= 0 && feeRate <= 50) ? feeRate : 10;
+    const platformFee = Math.round(amount * rate / 100);
     const session = await stripe.checkout.sessions.create({
+      ...JP_PAYMENT_CONFIG,
       mode: 'payment',
       line_items: [{
         price_data: {
@@ -562,6 +607,124 @@ async function createConnectAccount(req, res) {
 app.post('/create-connect-account', optionalAuth, createConnectAccount);
 app.post('/api/stripe/connect', optionalAuth, createConnectAccount);
 
+// ── Stripe Transfer（コーチへの送金）──
+async function createTransfer(req, res) {
+  if (!stripe) return stripeUnavailable(res);
+  try {
+    const { amount, connectedAccountId, coachId, teamId, month, description } = req.body;
+    const n = parseInt(amount);
+    if (!n || n < 100) return res.status(400).json({ error: '送金額は100円以上が必要です' });
+    if (!connectedAccountId || !connectedAccountId.startsWith('acct_')) {
+      return res.status(400).json({ error: '有効なStripe Connect口座IDが必要です' });
+    }
+
+    // Connect口座の状態確認
+    const account = await stripe.accounts.retrieve(connectedAccountId);
+    if (!account.charges_enabled || !account.payouts_enabled) {
+      return res.status(400).json({ error: 'コーチの口座設定が完了していません。銀行口座の登録・本人確認を完了してください。' });
+    }
+
+    const transfer = await stripe.transfers.create({
+      amount: n,
+      currency: 'jpy',
+      destination: connectedAccountId,
+      description: description || `部勝 コーチ報酬 ${month || ''}`.trim(),
+      metadata: { coachId: coachId || '', teamId: teamId || '', month: month || '' }
+    });
+
+    // Firestoreに送金記録
+    if (firestoreDb) {
+      await firestoreDb.collection('transfers').doc(transfer.id).set({
+        transferId: transfer.id,
+        amount: n,
+        coachId: coachId || '',
+        teamId: teamId || '',
+        connectedAccountId,
+        month: month || '',
+        status: 'completed',
+        createdAt: firebaseAdmin.firestore.FieldValue.serverTimestamp()
+      });
+    }
+
+    console.log(`[Stripe/Transfer] ¥${n} → ${connectedAccountId}`);
+    res.json({ transferId: transfer.id, amount: n, status: 'completed' });
+  } catch (e) {
+    console.error('[Stripe/Transfer]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+}
+app.post('/api/stripe/transfer', requireAdmin, createTransfer);
+
+// ── Stripe Connect口座ステータス確認 ──
+app.get('/api/stripe/account-status/:accountId', optionalAuth, async (req, res) => {
+  if (!stripe) return stripeUnavailable(res);
+  try {
+    const { accountId } = req.params;
+    if (!accountId || !accountId.startsWith('acct_')) {
+      return res.status(400).json({ error: '無効な口座IDです' });
+    }
+    const account = await stripe.accounts.retrieve(accountId);
+    res.json({
+      accountId: account.id,
+      charges_enabled: account.charges_enabled,
+      payouts_enabled: account.payouts_enabled,
+      details_submitted: account.details_submitted,
+      country: account.country,
+      default_currency: account.default_currency
+    });
+  } catch (e) {
+    console.error('[Stripe/AccountStatus]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── Stripe 返金 ──
+async function createRefund(req, res) {
+  if (!stripe) return stripeUnavailable(res);
+  try {
+    const { sessionId, reason } = req.body;
+    if (!sessionId) return res.status(400).json({ error: 'sessionIdが必要です' });
+
+    // セッションからPaymentIntentを取得
+    const session = await stripe.checkout.sessions.retrieve(sessionId);
+    if (!session.payment_intent) {
+      return res.status(400).json({ error: 'この決済は返金できません（PaymentIntentなし）' });
+    }
+
+    const refund = await stripe.refunds.create({
+      payment_intent: session.payment_intent,
+      reason: reason || 'requested_by_customer'
+    });
+
+    // Firestoreに返金記録
+    if (firestoreDb) {
+      await firestoreDb.collection('refunds').doc(refund.id).set({
+        refundId: refund.id,
+        sessionId,
+        paymentIntentId: session.payment_intent,
+        amount: refund.amount,
+        status: refund.status,
+        reason: reason || 'requested_by_customer',
+        metadata: session.metadata || {},
+        createdAt: firebaseAdmin.firestore.FieldValue.serverTimestamp()
+      });
+      // payments コレクションのステータスも更新
+      await firestoreDb.collection('payments').doc(sessionId).update({
+        status: 'refunded',
+        refundId: refund.id,
+        updatedAt: firebaseAdmin.firestore.FieldValue.serverTimestamp()
+      }).catch(() => {});
+    }
+
+    console.log(`[Stripe/Refund] ${refund.id} ¥${refund.amount}`);
+    res.json({ refundId: refund.id, amount: refund.amount, status: refund.status });
+  } catch (e) {
+    console.error('[Stripe/Refund]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+}
+app.post('/api/stripe/refund', requireAdmin, createRefund);
+
 // ── Webhook（Stripe → サーバー）──
 function handleWebhook(req, res) {
   let event;
@@ -583,20 +746,66 @@ function handleWebhook(req, res) {
     case 'checkout.session.completed': {
       const session = event.data.object;
       const meta = session.metadata || {};
-      console.log('[Webhook] 決済完了:', {
+      const paymentMethod = session.payment_method_types?.[0] || 'card';
+      console.log('[Webhook] 決済セッション完了:', {
         type: meta.type,
         amount: session.amount_total,
-        status: session.payment_status
+        payment_status: session.payment_status,
+        payment_method: paymentMethod
+      });
+
+      if (session.payment_status === 'paid') {
+        // クレカ等の即時決済 → 完了処理
+        _stats.payments.success++;
+        _stats.payments.amount += (session.amount_total || 0);
+        _writePaymentToFirestore(meta, session, 'card').catch(e =>
+          console.error('[Webhook] Firestore書込み失敗:', e.message)
+        );
+        if (SENDGRID_KEY && meta.type) {
+          _sendPaymentNotification(meta, session.amount_total, 'card').catch(e =>
+            console.error('[Webhook] 通知メール送信失敗:', e.message)
+          );
+        }
+      } else if (session.payment_status === 'unpaid') {
+        // コンビニ・銀行振込 → 入金待ち
+        console.log('[Webhook] 非同期決済: 入金待ち (' + paymentMethod + ')');
+        _writePaymentToFirestore(meta, session, paymentMethod, 'pending').catch(e =>
+          console.error('[Webhook] Firestore書込み失敗:', e.message)
+        );
+      }
+      break;
+    }
+    case 'checkout.session.async_payment_succeeded': {
+      // コンビニ払い・銀行振込の入金完了
+      const session = event.data.object;
+      const meta = session.metadata || {};
+      const methodLabel = (session.payment_method_types || []).includes('konbini') ? 'konbini' : 'bank_transfer';
+      console.log('[Webhook] 非同期決済 入金完了:', {
+        type: meta.type, amount: session.amount_total, method: methodLabel
       });
       _stats.payments.success++;
       _stats.payments.amount += (session.amount_total || 0);
-
-      // メール通知（SendGrid設定時）
+      _writePaymentToFirestore(meta, session, methodLabel).catch(e =>
+        console.error('[Webhook] Firestore書込み失敗:', e.message)
+      );
       if (SENDGRID_KEY && meta.type) {
-        _sendPaymentNotification(meta, session.amount_total).catch(e =>
+        const label = methodLabel === 'konbini' ? 'コンビニ' : '銀行振込';
+        _sendPaymentNotification(meta, session.amount_total, label).catch(e =>
           console.error('[Webhook] 通知メール送信失敗:', e.message)
         );
       }
+      break;
+    }
+    case 'checkout.session.async_payment_failed': {
+      const session = event.data.object;
+      const meta = session.metadata || {};
+      console.log('[Webhook] 非同期決済 失敗/期限切れ:', {
+        type: meta.type, amount: session.amount_total
+      });
+      _stats.payments.failed++;
+      _writePaymentToFirestore(meta, session, 'async', 'failed').catch(e =>
+        console.error('[Webhook] Firestore書込み失敗:', e.message)
+      );
       break;
     }
     case 'checkout.session.expired': {
@@ -616,17 +825,50 @@ function handleWebhook(req, res) {
   res.json({ received: true });
 }
 
+// ── Webhook → Firestore 書込み ──
+async function _writePaymentToFirestore(meta, session, method, overrideStatus) {
+  if (!firestoreDb) {
+    console.log('[Firestore] Admin SDK未初期化 → スキップ');
+    return;
+  }
+  const status = overrideStatus || 'paid';
+  const record = {
+    stripeSessionId: session.id,
+    type: meta.type || 'unknown',
+    amount: Number(meta.originalAmount) || 0,
+    platformFee: Number(meta.platformFee) || 0,
+    totalCharged: session.amount_total || 0,
+    method: method || 'card',
+    status,
+    teamId: meta.teamId || '',
+    playerId: meta.playerId || '',
+    guardianId: meta.guardianId || '',
+    coachId: meta.coachId || '',
+    month: meta.month || '',
+    invoiceId: meta.invoiceId || '',
+    threadId: meta.threadId || '',
+    createdAt: firebaseAdmin.firestore.FieldValue.serverTimestamp(),
+    updatedAt: firebaseAdmin.firestore.FieldValue.serverTimestamp()
+  };
+
+  // payments コレクションに書込み
+  await firestoreDb.collection('payments').doc(session.id).set(record, { merge: true });
+  console.log(`[Firestore] 決済記録書込み: ${session.id} (${meta.type}, ${status})`);
+}
+
 // 決済完了通知メール
-async function _sendPaymentNotification(meta, amount) {
+async function _sendPaymentNotification(meta, amount, method) {
   if (!SENDGRID_KEY) return;
   const typeLabel = { monthly_fee: '月謝', coach_fee: 'コーチ指導料', adhoc: '都度請求' };
-  const subject = `【部勝】${typeLabel[meta.type] || '決済'}が完了しました`;
+  const methodLabel = method || 'カード';
+  const subject = `【部勝】${typeLabel[meta.type] || '決済'}が完了しました（${methodLabel}）`;
   const body = `
     <div style="font-family:sans-serif;max-width:500px;margin:0 auto;padding:20px">
       <h2 style="color:#0ea5e9">💳 決済完了のお知らせ</h2>
       <table style="width:100%;border-collapse:collapse;margin:16px 0">
         <tr><td style="padding:8px;border-bottom:1px solid #eee;color:#666">種別</td><td style="padding:8px;border-bottom:1px solid #eee;font-weight:bold">${typeLabel[meta.type] || meta.type}</td></tr>
         <tr><td style="padding:8px;border-bottom:1px solid #eee;color:#666">金額</td><td style="padding:8px;border-bottom:1px solid #eee;font-weight:bold">¥${(amount||0).toLocaleString()}</td></tr>
+        <tr><td style="padding:8px;border-bottom:1px solid #eee;color:#666">決済方法</td><td style="padding:8px;border-bottom:1px solid #eee">${methodLabel}</td></tr>
         ${meta.month ? `<tr><td style="padding:8px;border-bottom:1px solid #eee;color:#666">対象月</td><td style="padding:8px;border-bottom:1px solid #eee">${meta.month}</td></tr>` : ''}
       </table>
       <p style="color:#666;font-size:12px">このメールは自動送信です。部勝（ブカツ）プラットフォーム</p>
