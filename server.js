@@ -415,6 +415,111 @@ app.get('/api/admin/stripe-dashboard', requireAdmin, async (req, res) => {
 
 // ブロック中IPの確認
 app.get('/api/admin/blocked', requireAdmin, (req, res) => {
+
+// ── 選手トレーニング・食事データ取得（チーム管理者用）──
+app.get('/api/team/player-data/:localId', requireAuth, async (req, res) => {
+  if (!firestoreDb) {
+    return res.status(503).json({ error: 'Firestore未接続' });
+  }
+  try {
+    const localId = req.params.localId;
+    if (!localId) return res.status(400).json({ error: 'プレイヤーIDが必要です' });
+
+    // users コレクションから localId → firebase UID を検索
+    const usersSnap = await firestoreDb.collection('users').where('id', '==', localId).limit(1).get();
+    if (usersSnap.empty) {
+      return res.json({ found: false, message: 'この選手はアプリ未登録です' });
+    }
+    const fbUid = usersSnap.docs[0].id;
+
+    // appdata/{uid} から個人データを取得
+    const appDoc = await firestoreDb.collection('appdata').doc(fbUid).get();
+    if (!appDoc.exists) {
+      return res.json({ found: true, fbUid, data: null, message: 'データ未同期' });
+    }
+    const d = appDoc.data();
+
+    // 必要なフィールドのみ返却（プライバシー配慮）
+    res.json({
+      found: true,
+      fbUid,
+      data: {
+        trainingLog: d.trainingLog || {},
+        mealHistory: d.mealHistory || {},
+        meals: d.meals || { today: [], water: 0 },
+        bodyLog: d.bodyLog || {},
+        conditionLog: d.conditionLog || {},
+        nutriGoals: d.nutriGoals || {},
+        injuryHistory: d.injuryHistory || [],
+        doneSets: d.doneSets || {},
+      },
+      syncedAt: d._syncedAt || '',
+    });
+  } catch (e) {
+    console.error('[Team/PlayerData]', e.message);
+    res.status(500).json({ error: '選手データの取得に失敗しました' });
+  }
+});
+
+// ── 複数選手の概要一括取得（チーム一覧用）──
+app.post('/api/team/players-summary', requireAuth, async (req, res) => {
+  if (!firestoreDb) {
+    return res.status(503).json({ error: 'Firestore未接続' });
+  }
+  try {
+    const { playerIds } = req.body;
+    if (!Array.isArray(playerIds) || playerIds.length === 0) {
+      return res.status(400).json({ error: 'playerIdsが必要です' });
+    }
+    // 最大30名まで
+    const ids = playerIds.slice(0, 30);
+
+    // 一括で users コレクションを検索
+    const usersSnap = await firestoreDb.collection('users').where('id', 'in', ids).get();
+    const idToUid = {};
+    usersSnap.forEach(doc => { idToUid[doc.data().id] = doc.id; });
+
+    const summaries = {};
+    for (const localId of ids) {
+      const uid = idToUid[localId];
+      if (!uid) { summaries[localId] = { registered: false }; continue; }
+      try {
+        const appDoc = await firestoreDb.collection('appdata').doc(uid).get();
+        if (!appDoc.exists) { summaries[localId] = { registered: true, synced: false }; continue; }
+        const d = appDoc.data();
+        const tLog = d.trainingLog || {};
+        const pLogs = tLog[localId] || {};
+        const recent = Object.values(pLogs).sort((a, b) => (b.date || '') > (a.date || '') ? 1 : -1).slice(0, 7);
+        const mealH = d.mealHistory || {};
+        const mealDays = Object.keys(mealH).length;
+        const todayMeals = d.meals?.today || [];
+        const water = d.meals?.water || 0;
+
+        summaries[localId] = {
+          registered: true, synced: true,
+          syncedAt: d._syncedAt || '',
+          training: {
+            totalDays: Object.keys(pLogs).length,
+            recentDays: recent.length,
+            avgCond: recent.length ? +(recent.reduce((s, e) => s + (e.cond || 0), 0) / recent.length).toFixed(1) : null,
+            avgKcal: recent.length ? Math.round(recent.reduce((s, e) => s + (e.kcal || 0), 0) / recent.length) : null,
+            lastDate: recent[0]?.date || '',
+          },
+          nutrition: {
+            mealDays, todayCount: todayMeals.length, water,
+            todayKcal: todayMeals.reduce((s, m) => s + (m.kcal || m.cal || 0), 0),
+          },
+        };
+      } catch (e) {
+        summaries[localId] = { registered: true, synced: false, error: true };
+      }
+    }
+    res.json({ summaries });
+  } catch (e) {
+    console.error('[Team/PlayersSummary]', e.message);
+    res.status(500).json({ error: '選手データの取得に失敗しました' });
+  }
+});
   const blocked = Object.entries(_authFails)
     .filter(([, times]) => times.length >= 5)
     .map(([ip, times]) => ({
@@ -1196,6 +1301,8 @@ app.get('/api/v1/docs', (req, res) => {
       admin_endpoints: { method: 'GET', path: '/api/admin/endpoints', auth: 'admin', desc: 'エンドポイント統計' },
       admin_payments: { method: 'GET', path: '/api/admin/payments', auth: 'admin', desc: '決済統計' },
       admin_blocked: { method: 'GET', path: '/api/admin/blocked', auth: 'admin', desc: 'ブロックIP一覧' },
+      team_player_data: { method: 'GET', path: '/api/team/player-data/:localId', auth: 'required', desc: '選手トレーニング・食事データ取得' },
+      team_players_summary: { method: 'POST', path: '/api/team/players-summary', auth: 'required', desc: '複数選手概要一括取得' },
       admin_unblock: { method: 'POST', path: '/api/admin/unblock', auth: 'admin', desc: 'IPブロック解除' },
     }
   });
