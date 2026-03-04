@@ -1,6 +1,6 @@
 {
   "name": "bukatsu-backend",
-  "version": "3.2.0",
+  "version": "3.3.0",
   "description": "部勝（ブカツ）Backend API Server",
   "main": "server.js",
   "scripts": {
@@ -13,6 +13,7 @@
   "dependencies": {
     "cors": "^2.8.5",
     "express": "^4.21.0",
+    "helmet": "^8.0.0",
     "stripe": "^17.4.0"
   }
 }
