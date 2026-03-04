@@ -438,6 +438,17 @@ function validateAmount(amount) {
   return n;
 }
 
+// 手数料率バリデーション（プラットフォーム最低保証: 5%）
+const PLATFORM_MIN_FEE_RATE = 5;  // プラットフォーム最低手数料 5%
+const PLATFORM_MAX_FEE_RATE = 50; // 最大50%
+const PLATFORM_DEFAULT_FEE_RATE = 10; // デフォルト10%
+
+function validateFeeRate(feeRate) {
+  const rate = parseFloat(feeRate);
+  if (isNaN(rate)) return PLATFORM_DEFAULT_FEE_RATE;
+  return Math.max(PLATFORM_MIN_FEE_RATE, Math.min(PLATFORM_MAX_FEE_RATE, rate));
+}
+
 // ── 日本向け決済手段設定（クレカ・コンビニ・銀行振込） ──
 const JP_PAYMENT_CONFIG = {
   payment_method_types: ['card', 'konbini', 'customer_balance'],
@@ -466,8 +477,7 @@ async function createTuitionSession(req, res) {
     if (!amount) return res.status(400).json({ error: '金額が不正です (100〜10,000,000円)' });
     const { teamId, playerId, guardianId, month, teamName, playerName, feeRate } = req.body;
 
-    // 手数料率: フロントから送信された値を使用（0〜50%の範囲でバリデーション、デフォルト10%）
-    const rate = (typeof feeRate === 'number' && feeRate >= 0 && feeRate <= 50) ? feeRate : 10;
+    const rate = validateFeeRate(feeRate);
     const platformFee = Math.round(amount * rate / 100);
     const session = await stripe.checkout.sessions.create({
       ...JP_PAYMENT_CONFIG,
@@ -510,7 +520,7 @@ async function createCoachSession(req, res) {
     if (!amount) return res.status(400).json({ error: '金額が不正です' });
     const { threadId, month, coachName, coachId, teamId, teamName, feeRate } = req.body;
 
-    const rate = (typeof feeRate === 'number' && feeRate >= 0 && feeRate <= 50) ? feeRate : 10;
+    const rate = validateFeeRate(feeRate);
     const platformFee = Math.round(amount * rate / 100);
     const session = await stripe.checkout.sessions.create({
       ...JP_PAYMENT_CONFIG,
@@ -553,7 +563,7 @@ async function createAdhocSession(req, res) {
     if (!amount) return res.status(400).json({ error: '金額が不正です' });
     const { invoiceId, title, teamId, playerId, feeRate } = req.body;
 
-    const rate = (typeof feeRate === 'number' && feeRate >= 0 && feeRate <= 50) ? feeRate : 10;
+    const rate = validateFeeRate(feeRate);
     const platformFee = Math.round(amount * rate / 100);
     const session = await stripe.checkout.sessions.create({
       ...JP_PAYMENT_CONFIG,
