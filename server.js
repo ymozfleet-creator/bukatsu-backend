@@ -322,6 +322,97 @@ app.get('/api/admin/payments', requireAdmin, (req, res) => {
   res.json(_stats.payments);
 });
 
+// Stripe決済詳細（Firestore payments/transfers/refunds）
+app.get('/api/admin/stripe-dashboard', requireAdmin, async (req, res) => {
+  if (!firestoreDb) {
+    return res.json({ payments: [], transfers: [], refunds: [], firestoreConnected: false });
+  }
+  try {
+    // payments コレクション取得
+    const paySnap = await firestoreDb.collection('payments').orderBy('createdAt', 'desc').limit(500).get();
+    const payments = [];
+    paySnap.forEach(doc => {
+      const d = doc.data();
+      payments.push({
+        id: doc.id,
+        stripeSessionId: d.stripeSessionId || doc.id,
+        type: d.type || '',
+        amount: d.amount || 0,
+        platformFee: d.platformFee || 0,
+        totalCharged: d.totalCharged || 0,
+        method: d.method || 'card',
+        status: d.status || 'unknown',
+        teamId: d.teamId || '',
+        playerId: d.playerId || '',
+        guardianId: d.guardianId || '',
+        coachId: d.coachId || '',
+        month: d.month || '',
+        invoiceId: d.invoiceId || '',
+        threadId: d.threadId || '',
+        createdAt: d.createdAt?._seconds ? new Date(d.createdAt._seconds * 1000).toISOString() : '',
+        updatedAt: d.updatedAt?._seconds ? new Date(d.updatedAt._seconds * 1000).toISOString() : '',
+      });
+    });
+
+    // transfers コレクション取得
+    const trSnap = await firestoreDb.collection('transfers').orderBy('createdAt', 'desc').limit(200).get();
+    const transfers = [];
+    trSnap.forEach(doc => {
+      const d = doc.data();
+      transfers.push({
+        id: doc.id,
+        transferId: d.transferId || doc.id,
+        amount: d.amount || 0,
+        coachId: d.coachId || '',
+        teamId: d.teamId || '',
+        month: d.month || '',
+        status: d.status || '',
+        connectedAccountId: d.connectedAccountId || '',
+        createdAt: d.createdAt?._seconds ? new Date(d.createdAt._seconds * 1000).toISOString() : '',
+      });
+    });
+
+    // refunds コレクション取得
+    const rfSnap = await firestoreDb.collection('refunds').orderBy('createdAt', 'desc').limit(200).get();
+    const refunds = [];
+    rfSnap.forEach(doc => {
+      const d = doc.data();
+      refunds.push({
+        id: doc.id,
+        refundId: d.refundId || doc.id,
+        sessionId: d.sessionId || '',
+        amount: d.amount || 0,
+        status: d.status || '',
+        reason: d.reason || '',
+        paymentIntentId: d.paymentIntentId || '',
+        metadata: d.metadata || {},
+        createdAt: d.createdAt?._seconds ? new Date(d.createdAt._seconds * 1000).toISOString() : '',
+      });
+    });
+
+    // Stripe手数料率（日本市場）
+    const stripeFeeRates = {
+      card: { rate: 3.6, fixed: 0, label: 'クレジットカード 3.6%' },
+      konbini: { rate: 0, fixed: 120, label: 'コンビニ ¥120/件' },
+      bank_transfer: { rate: 0, fixed: 0, label: '銀行振込 ¥0' },
+      customer_balance: { rate: 0, fixed: 0, label: '銀行振込 ¥0' },
+    };
+
+    res.json({
+      firestoreConnected: true,
+      payments,
+      transfers,
+      refunds,
+      stripeFeeRates,
+      serverStats: _stats.payments,
+      fetchedAt: new Date().toISOString(),
+    });
+  } catch (e) {
+    console.error('[Admin/StripeDashboard]', e.message);
+    res.status(500).json({ error: '決済データの取得に失敗しました' });
+  }
+});
+
 // ブロック中IPの確認
 app.get('/api/admin/blocked', requireAdmin, (req, res) => {
   const blocked = Object.entries(_authFails)
