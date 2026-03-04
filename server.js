@@ -731,7 +731,6 @@ async function createConnectAccount(req, res) {
     console.error('[Stripe/Connect]', e.message);
     res.status(500).json({ error: 'Connect口座の作成に失敗しました' });
   }
-  }
 }
 app.post('/create-connect-account', requireAuth, createConnectAccount);
 app.post('/api/stripe/connect', requireAuth, createConnectAccount);
