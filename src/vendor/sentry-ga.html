@@ -1,0 +1,50 @@
+<!-- Sentry Error Tracking (本番用: DSNを設定してください) -->
+<script src="https://browser.sentry-cdn.com/8.0.0/bundle.min.js" crossorigin="anonymous"></script>
+<script>
+  if(typeof Sentry !== 'undefined'){
+    const _sentryDsn = DB.settings?.sentryDsn || '';
+    if(_sentryDsn.includes('YOUR_KEY')){
+    } else {
+    Sentry.init({
+      dsn: _sentryDsn,
+      tracesSampleRate: 0.1,
+      replaysSessionSampleRate: 0,
+      environment: location.hostname === 'localhost' ? 'development' : 'production',
+      release: 'mycoach-myteam@3.3.0',
+      ignoreErrors: [
+        'Network request failed','Failed to fetch','Load failed',
+        'ResizeObserver loop','Non-Error promise rejection',
+        'TypeError: cancelled','AbortError'
+      ],
+      beforeSend(event){
+        // PII除去
+        if(event.user){ delete event.user.email; delete event.user.username; delete event.user.ip_address; }
+        // localStorage系のエラーは頻発するので抑制
+        if(event.message && event.message.includes('localStorage')) return null;
+        return event;
+      }
+    });
+    } // end if DSN configured
+  }
+  // グローバルエラーハンドラー
+  window.onerror = function(msg, src, line, col, err){
+    console.error('[GlobalError]', msg, src, line);
+    if(typeof Sentry !== 'undefined' && Sentry.captureException) Sentry.captureException(err || new Error(msg));
+    // 監査ログに記録
+    if(typeof addAuditLog === 'function') addAuditLog('error', 'システムエラー: ' + (msg||'').slice(0,100), {src,line});
+    return false;
+  };
+  window.addEventListener('unhandledrejection', function(e){
+    console.error('[UnhandledRejection]', e.reason);
+    if(typeof Sentry !== 'undefined' && Sentry.captureException) Sentry.captureException(e.reason);
+  });
+</script>
+<!-- Google Analytics 4 -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=G-D80NJPNXTK"></script>
+<script>
+  window.dataLayer=window.dataLayer||[];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js',new Date());
+  gtag('config','G-D80NJPNXTK'); // ← GA4測定IDを設定
+</script>
+</head>
