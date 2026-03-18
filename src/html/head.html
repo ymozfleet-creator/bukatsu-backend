@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="referrer" content="strict-origin-when-cross-origin">
+<meta http-equiv="X-Frame-Options" content="DENY">
+<meta http-equiv="X-Content-Type-Options" content="nosniff">
+<meta http-equiv="Permissions-Policy" content="camera=(self), microphone=(), geolocation=(), payment=(self https://js.stripe.com)">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com https://www.gstatic.com https://www.googletagmanager.com https://browser.sentry-cdn.com https://apis.google.com https://js.stripe.com blob:; style-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com https://fonts.googleapis.com; font-src https://cdnjs.cloudflare.com https://fonts.gstatic.com; img-src 'self' data: blob: https:; connect-src 'self' https://*.firebaseio.com https://*.googleapis.com https://*.google-analytics.com https://*.sentry.io wss://*.firebaseio.com https://generativelanguage.googleapis.com https://api.stripe.com https://*.firebaseapp.com https://firestore.googleapis.com; manifest-src 'self' blob:; frame-src https://*.firebaseapp.com https://js.stripe.com https://checkout.stripe.com https://connect.stripe.com https://accounts.google.com; frame-ancestors 'none'">
+<script>if(location.protocol==='http:' && location.hostname!=='localhost' && location.hostname!=='127.0.0.1'){location.replace('https://'+location.host+location.pathname+location.search+location.hash);}</script>
+<meta name="description" content="部勝（ブカツ）｜スポーツチーム運営プラットフォーム。チーム管理・コーチマッチング・選手育成・AI栄養管理をワンストップで。">
+<meta name="keywords" content="スポーツ,コーチ,チーム,月謝管理,マッチング,育成">
+<meta name="theme-color" content="#0ea5e9">
+<!-- OGP -->
+<meta property="og:type" content="website">
+<meta property="og:title" content="部勝（ブカツ）｜スポーツチーム運営プラットフォーム">
+<meta property="og:description" content="スポーツチーム運営プラットフォーム。チーム管理・コーチマッチング・選手育成・AI栄養管理をワンストップで。">
+<meta property="og:image" content="/og-image.png">
+<meta property="og:site_name" content="MyCOACH-MyTEAM">
+<meta property="og:locale" content="ja_JP">
+<!-- Twitter Card -->
+<meta name="twitter:card" content="summary_large_image">
+<!-- PWA -->
+<meta name="theme-color" content="#0ea5e9">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="MyCOACH">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="twitter:title" content="部勝（ブカツ）｜スポーツチーム運営プラットフォーム">
+<meta name="twitter:description" content="コーチとチームをつなぐスポーツ運営プラットフォーム。">
+<meta name="twitter:image" content="/og-image.png">
+<!-- Favicon (SVG inline) -->
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%230ea5e9'/><path d='M16 4L6 10v6c0 7 4.5 13.5 10 15 5.5-1.5 10-8 10-15v-6L16 4z' fill='white' opacity='.9'/><path d='M12 16l3 3 5-5' stroke='%230369a1' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round' fill='none'/></svg>" type="image/svg+xml">
+<link rel="apple-touch-icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%230ea5e9'/><path d='M16 4L6 10v6c0 7 4.5 13.5 10 15 5.5-1.5 10-8 10-15v-6L16 4z' fill='white' opacity='.9'/></svg>">
+<title>MyCOACH-MyTEAM | 部活動・スポーツチーム運営プラットフォーム</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js">
+</script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js">
+</script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js">
+</script>
+<script>
+// PWA Manifest (動的生成でstart_urlを正しく設定)
+const _mf = {name:'MyCOACH-MyTEAM',short_name:'MyCoach',start_url:location.origin+'/',display:'standalone',background_color:'#0e1e32',theme_color:'#ff6b2b',icons:[{src:"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 192 192'%3E%3Crect width='192' height='192' rx='32' fill='%23ff6b2b'/%3E%3C/svg%3E",sizes:'192x192',type:'image/svg+xml'}]};
+const _mfBlob = new Blob([JSON.stringify(_mf)], {type:'application/json'});
+const _mfLink = document.createElement('link');
+_mfLink.rel = 'manifest';
+_mfLink.href = URL.createObjectURL(_mfBlob);
+document.head.appendChild(_mfLink);
+</script>
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;1,9..40,400&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@700;800;900&family=Noto+Sans+JP:wght@400;500;700;900&display=swap" rel="stylesheet">
+

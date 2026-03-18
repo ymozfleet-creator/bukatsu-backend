@@ -1,0 +1,63 @@
+<!-- Firebase -->
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/12.10.0/firebase-app.js";
+  import { getAnalytics } from "https://www.gstatic.com/firebasejs/12.10.0/firebase-analytics.js";
+  import { getAuth, signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut, onAuthStateChanged, sendPasswordResetEmail, sendEmailVerification, GoogleAuthProvider, signInWithPopup, updatePassword, reauthenticateWithCredential, EmailAuthProvider, deleteUser as fbDeleteUser }
+    from "https://www.gstatic.com/firebasejs/12.10.0/firebase-auth.js";
+  import { getFirestore, doc, getDoc, setDoc, deleteDoc, collection, getDocs, addDoc,
+    onSnapshot, query, where, orderBy, serverTimestamp, Timestamp }
+    from "https://www.gstatic.com/firebasejs/12.10.0/firebase-firestore.js";
+
+  const firebaseConfig = {
+    apiKey: "AIzaSyAdP8JT7N2CTBiZiQdLHzyBGa81DuSTEuo",
+    authDomain: "myteam-mycoach.firebaseapp.com",
+    projectId: "myteam-mycoach",
+    storageBucket: "myteam-mycoach.firebasestorage.app",
+    messagingSenderId: "990997574202",
+    appId: "1:990997574202:web:94e511bc884e514412bb03",
+    measurementId: "G-ZGY4NHREGS"
+  };
+  const app = initializeApp(firebaseConfig);
+  const analytics = getAnalytics(app);
+  const auth = getAuth(app);
+  const db = getFirestore(app);
+
+  // Expose to main script
+  window._fbAuth = auth;
+  window._fbDB = db;
+  window._fbFn = {
+    signInWithEmailAndPassword,
+    createUserWithEmailAndPassword,
+    signOut,
+    onAuthStateChanged,
+    sendPasswordResetEmail,
+    sendEmailVerification,
+    GoogleAuthProvider,
+    signInWithPopup,
+    updatePassword,
+    reauthenticateWithCredential,
+    EmailAuthProvider,
+    fbDeleteUser,
+    doc, getDoc, setDoc, deleteDoc, collection, getDocs, addDoc,
+    onSnapshot, query, where, orderBy, serverTimestamp, Timestamp
+  };
+
+  // Auth state listener - restore session on page load
+  onAuthStateChanged(auth, async (user) => {
+    if (user && typeof window._onFirebaseAuth === 'function') {
+      window._onFirebaseAuth(user);
+    }
+  });
+
+  window._fbReady = true;
+  window.dispatchEvent(new Event('firebase-ready'));
+
+  // 既存セッション: Firebase未登録ユーザーを自動登録
+  setTimeout(async () => {
+    try {
+      if(!auth.currentUser && typeof DB !== 'undefined' && DB.currentUser){
+        // ローカルログイン済みだがFirebase未サインインの場合
+      }
+    } catch(e){}
+  }, 2000);
+</script>

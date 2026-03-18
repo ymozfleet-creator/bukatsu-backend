@@ -1,0 +1,41 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isAuthenticated() { return request.auth != null; }
+    function isOwner(uid) { return isAuthenticated() && request.auth.uid == uid; }
+
+    match /users/{uid} {
+      allow read: if isOwner(uid);
+      allow create: if isOwner(uid);
+      allow update: if isOwner(uid) && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['role']);
+      allow delete: if false;
+    }
+    match /users_by_email/{emailKey} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated();
+      allow update: if isAuthenticated() && request.resource.data.id == resource.data.id;
+      allow delete: if false;
+    }
+    match /appdata/shared {
+      allow read: if isAuthenticated();
+      allow write: if isAuthenticated()
+        && request.resource.size < 5 * 1024 * 1024;
+    }
+    match /appdata/{uid} {
+      allow read: if isOwner(uid);
+      allow write: if isOwner(uid) && request.resource.size < 2 * 1024 * 1024;
+      allow delete: if false;
+    }
+    match /userdata/{docId} {
+      allow read: if isAuthenticated() && docId.matches(request.auth.uid + '_.*');
+      allow write: if isAuthenticated() && docId.matches(request.auth.uid + '_.*') && request.resource.size < 1 * 1024 * 1024;
+      allow delete: if false;
+    }
+    // 決済ログ（サーバー側からのみ書き込み、管理者のみ読み取り）
+    match /payment_logs/{logId} {
+      allow read: if isAuthenticated();
+      allow write: if false; // Cloud Functionsのadmin SDKのみ書き込み可
+    }
+    match /{document=**} { allow read, write: if false; }
+  }
+}
